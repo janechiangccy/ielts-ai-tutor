@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+env/
+
+# Environment Variables (非常重要！)
+*.env
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
