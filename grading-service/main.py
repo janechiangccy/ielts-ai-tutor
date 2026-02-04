@@ -1,13 +1,20 @@
 import os
+import json
 from typing import List
 from fastapi import FastAPI, BackgroundTasks
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
 app = FastAPI(title="IELTS Grading Engine")
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# 1. 定義 AI 回傳的結構化資料模型 (Schema)
+# 1. 修改 Client 設定：讓 OpenAI SDK 連去 Google
+# 注意：這裡使用環境變數 OPENAI_API_KEY，但填入的是 Gemini 的 Key
+client = OpenAI(
+    api_key=os.getenv("OPENAI_API_KEY"), 
+    base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
+)
+
+# --- 資料模型定義 (保持不變) ---
 class DetailedScores(BaseModel):
     fluency_and_coherence: float = Field(..., ge=0, le=9.0)
     lexical_resource: float = Field(..., ge=0, le=9.0)
@@ -25,27 +32,53 @@ class GradingReport(BaseModel):
     detailed_scores: DetailedScores
     ai_feedback: AIFeedback
 
-# 2. 核心 AI 邏輯：利用 LLM 進行評分
-def process_grading(assessment_id: str, transcript: str):
-    # 這裡實作 RAG 或直接調用 LLM
-    # 使用 OpenAI 的 Response Format (JSON Mode) 確保輸出穩定
-    response = client.beta.chat.completions.parse(
-        model="gpt-4o-2024-08-06",
-        messages=[
-            {"role": "system", "content": "You are a professional IELTS examiner. Grade the transcript based on official criteria."},
-            {"role": "user", "content": f"Assess this transcript: {transcript}"}
-        ],
-        response_format=GradingReport,
-    )
-    
-    report = response.choices[0].message.parsed
-    # 這裡可以接上 Database 存檔邏輯 (例如 PostgreSQL)
-    print(f"Report for {assessment_id} generated: {report.overall_band}")
+class GradingRequest(BaseModel):
+    assessment_id: str
+    transcript: str
 
-# 3. API Endpoint
+# 2. 核心 AI 邏輯修正
+def process_grading(assessment_id: str, transcript: str):
+    print(f"Starting grading for {assessment_id} using Gemini...")
+    
+    # 取得 Pydantic 的 JSON Schema 字串，放入 Prompt 讓 Gemini 知道格式
+    schema_instruction = json.dumps(GradingReport.model_json_schema(), indent=2)
+
+    try:
+        # 改用標準的 .create (比 .beta.parse 更相容於 Gemini)
+        response = client.chat.completions.create(
+            model="gemini-2.5-flash-lite-preview-09-2025",  # 改用 Google 的模型
+            messages=[
+                {
+                    "role": "system", 
+                    "content": (
+                        "You are a professional IELTS examiner. "
+                        "Grade the transcript based on official criteria. "
+                        "You MUST output raw JSON matching this schema:\n"
+                        f"{schema_instruction}"
+                    )
+                },
+                {"role": "user", "content": f"Assess this transcript: {transcript}"}
+            ],
+            response_format={"type": "json_object"}, # 強制輸出 JSON
+            temperature=0.3
+        )
+        
+        # 解析回傳的 JSON
+        content = response.choices[0].message.content
+        report_dict = json.loads(content)
+        
+        # 驗證格式 (用 Pydantic 再洗一次)
+        report = GradingReport(**report_dict)
+        
+        print(f"Report for {assessment_id} generated successfully!")
+        print(f"Overall Band: {report.overall_band}")
+        print(f"Feedback: {report.ai_feedback.strengths[:1]}...") # 印出一點點看
+
+    except Exception as e:
+        print(f"Error grading {assessment_id}: {str(e)}")
+
+# 3. API Endpoint (保持你修改後的正確版本)
 @app.post("/internal/v1/grade", status_code=202)
-async def trigger_grading(assessment_id: str, transcript: str, background_tasks: BackgroundTasks):
-    # 使用 FastAPI 的 BackgroundTasks 模擬異步處理
-    # 在真實的 K8s 環境中，這裡通常是由 Consumer 監聽 Message Queue 後觸發
-    background_tasks.add_task(process_grading, assessment_id, transcript)
-    return {"message": "Grading process started", "assessment_id": assessment_id}
+async def trigger_grading(request: GradingRequest, background_tasks: BackgroundTasks):
+    background_tasks.add_task(process_grading, request.assessment_id, request.transcript)
+    return {"message": "Grading process started", "assessment_id": request.assessment_id}
