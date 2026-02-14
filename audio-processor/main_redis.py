@@ -13,9 +13,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 app = FastAPI(title="Audio Processor Service")
-
+# 連接剛剛啟動的 Redis
 redis_conn = Redis(host='localhost', port=6379)
-q = Queue('grading_tasks', connection=redis_conn)
+# 建立一個名為 'grading_tasks' 的工作隊列
+grading_queue = Queue('grading_tasks', connection=redis_conn)
+
 # 設定 Grading Service 的網址
 # 注意：在 Podman 內，我們會用 localhost 或 container name 通訊
 # 設定環境變數
@@ -60,19 +62,34 @@ async def process_audio(file: UploadFile = File(...), user_id: str = "test_user"
         print(f"📝 轉寫結果: {transcript}")
 
         # --- 階段 2: 呼叫 Grading Service (Microservice Communication) ---
-        print(f"🔗 正在將文字傳送至評分服務: {GRADING_SERVICE_URL}")
-        job = q.enqueue(
-        "worker.process_grading_task", # 遠端 Worker 要執行的函數名
-        args=(user_id, transcript),
-        job_id=f"grading_{user_id}_{os.urandom(4).hex()}"
+        #print(f"🔗 正在將文字傳送至評分服務: {GRADING_SERVICE_URL}")
+        job = grading_queue.enqueue(
+            "worker.process_grading_task", 
+            args=(user_id, transcript),
+            job_id=f"job_{user_id}_{os.urandom(2).hex()}"
         )
 
         return {
             "status": "queued",
             "job_id": job.get_id(),
-            "message": "Your speaking is being assessed. Check back later!"
+            "transcript_preview": transcript[:30] + "...",
+            "message": "音檔已收到並進入評分隊列。您可以稍後查看結果。"
         }
 
     except Exception as e:
         print(f"❌ Error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/results/{job_id}")
+async def get_result(job_id: str):
+    job = grading_queue.fetch_job(job_id)
+    if job is None:
+        return {"status": "not_found"}
+    elif job.is_finished:
+        return {
+            "job_id": job_id,
+            "status": "completed",
+            "result": job.result  # 這會拿到 process_grading_task 回傳的內容
+        }
+    else:
+        return {"job_id": job_id, "status": job.get_status()}
