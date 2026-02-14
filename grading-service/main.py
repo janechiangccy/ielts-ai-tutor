@@ -4,6 +4,8 @@ from typing import List
 from fastapi import FastAPI, BackgroundTasks
 from pydantic import BaseModel, Field
 from openai import OpenAI
+from dotenv import load_dotenv
+load_dotenv()
 
 app = FastAPI(title="IELTS Grading Engine")
 
@@ -63,16 +65,12 @@ def process_grading(assessment_id: str, transcript: str):
             temperature=0.3
         )
         
-        # 解析回傳的 JSON
-        content = response.choices[0].message.content
-        report_dict = json.loads(content)
+        # 解析回傳結果
+        raw_content = response.choices[0].message.content
+        report_data = json.loads(raw_content)
+        report = GradingReport(**report_data)
         
-        # 驗證格式 (用 Pydantic 再洗一次)
-        report = GradingReport(**report_dict)
-        
-        print(f"Report for {assessment_id} generated successfully!")
-        print(f"Overall Band: {report.overall_band}")
-        print(f"Feedback: {report.ai_feedback.strengths[:1]}...") # 印出一點點看
+        print(f"✅ Report for {assessment_id} generated: {report.overall_band}")
 
     except Exception as e:
         print(f"Error grading {assessment_id}: {str(e)}")
